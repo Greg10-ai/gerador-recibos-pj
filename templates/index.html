@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gerador de Recibo PJ</title>
+</head>
+<body>
+
+    <h2>Gerar Recibo</h2>
+
+    <form method="POST" enctype="multipart/form-data">
+
+        <input type="file" name="file" required><br><br>
+
+        <select name="mes" required>
+            {% for mes in meses %}
+                <option value="{{ mes }}" {% if mes == mes_atual %}selected{% endif %}>
+                    {{ mes }}
+                </option>
+            {% endfor %}
+        </select><br><br>
+
+        <button type="submit">Gerar Recibos</button>
+
+    </form>
+
+</body>
+</html>
