@@ -201,7 +201,7 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None):
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         run = p_img.add_run()
-        run.add_picture(imagem, width=Inches(5))
+        run.add_picture(imagem, width=Inches(4))
 
     caminho = os.path.join(UPLOAD_FOLDER, f"Recibo_{vendedor}.docx")
     doc.save(caminho)
