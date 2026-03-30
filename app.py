@@ -28,8 +28,51 @@ SENHA = "Monique"
 def normalizar_nome(nome):
     nome = str(nome).strip().lower()
     nome = unicodedata.normalize('NFKD', nome).encode('ASCII', 'ignore').decode('ASCII')
+    nome = " ".join(nome.split())
     nome = nome.replace(" ", "")
     return nome
+
+# ==========================
+# DADOS BANCÁRIOS (CORRIGIDO)
+# ==========================
+def carregar_dados_bancarios(caminho):
+    df = pd.read_excel(caminho)
+
+    # normaliza colunas
+    df.columns = [normalizar_nome(col) for col in df.columns]
+
+    mapa = {}
+
+    for _, row in df.iterrows():
+        nome = normalizar_nome(row.get("vendedores", ""))
+
+        info = {
+            "nome": row.get("vendedores", ""),
+            "cnpj": row.get("cnpj", ""),
+            "banco": row.get("banco", ""),
+            "agencia": row.get("agencia", ""),
+            "conta": row.get("conta", ""),
+            "pix": row.get("pix", "")
+        }
+
+        mapa[nome] = info
+
+    return mapa
+
+# MATCH INTELIGENTE
+def encontrar_dados_bancarios(nome_vendedor, mapa_banco):
+    chave = normalizar_nome(nome_vendedor)
+
+    if chave in mapa_banco:
+        return mapa_banco[chave]
+
+    for k in mapa_banco:
+        if chave in k or k in chave:
+            print(f"⚠️ Banco match aproximado: {nome_vendedor} -> {k}")
+            return mapa_banco[k]
+
+    print(f"❌ Sem dados bancários para: {nome_vendedor}")
+    return {}
 
 def encontrar_imagem(nome_vendedor, mapa_imagens):
     chave = normalizar_nome(nome_vendedor)
@@ -39,14 +82,10 @@ def encontrar_imagem(nome_vendedor, mapa_imagens):
 
     for k in mapa_imagens:
         if chave in k or k in chave:
-            print(f"⚠️ Match aproximado: {nome_vendedor} -> {k}")
             return mapa_imagens[k]
 
-    print(f"❌ Sem imagem para: {nome_vendedor}")
     return None
 
-# ==========================
-# TRATAMENTO DE VALORES
 # ==========================
 def tratar_valor(valor):
     if pd.isna(valor):
@@ -60,7 +99,6 @@ def tratar_valor(valor):
     except:
         return None
 
-# ==========================
 def formatar_real(valor):
     valor = round(float(valor), 2)
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -75,8 +113,6 @@ def formatar_data_extenso(data_str):
 def competencia_mes(mes):
     return f"{mes}/{datetime.now().year}"
 
-# ==========================
-# GERAR IMAGENS INTELIGENTES
 # ==========================
 def gerar_imagens_abas(caminho_excel, mes_escolhido):
     imagens = {}
@@ -102,7 +138,6 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
                     break
 
             if linha_mes is None or col_mes is None:
-                print(f"❌ Mês não encontrado na aba {aba}")
                 continue
 
             header_row = linha_mes + 1
@@ -112,19 +147,6 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
             valor_col = df.columns[col_mes]
 
             df_ab = df[[descricao_col, valor_col]].dropna(how="all").head(50)
-
-            # 🔥 MELHORIA: garantir 2 casas decimais na imagem
-            def formatar_valor_img(v):
-                try:
-                    v = float(v)
-                    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                except:
-                    return v
-
-            df_ab[valor_col] = df_ab[valor_col].apply(formatar_valor_img)
-
-            if df_ab.empty:
-                continue
 
             fig, ax = plt.subplots(figsize=(8, len(df_ab) * 0.4 + 1))
             ax.axis('off')
@@ -143,20 +165,15 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
             plt.savefig(caminho_img, bbox_inches='tight')
             plt.close(fig)
 
-            chave = normalizar_nome(aba)
-            imagens[chave] = caminho_img
+            imagens[normalizar_nome(aba)] = caminho_img
 
-            print(f"✅ Imagem OK: {aba}")
-
-        except Exception as e:
-            print(f"❌ Erro na aba {aba}: {e}")
+        except:
+            continue
 
     return imagens
 
 # ==========================
-# GERAR RECIBO
-# ==========================
-def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None):
+def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_bancarios=None):
 
     doc = Document()
 
@@ -170,9 +187,10 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None):
     total_extenso = num2words(total, lang='pt_BR').capitalize()
 
     doc.add_paragraph(
-        f"\nInformo que recebi da empresa, "
-        f"a quantia de {formatar_real(total)} "
-        f"({total_extenso})."
+        f"\nInformo que recebi da empresa 3i Importação e Exportação Ltda, CNPJ 20.783.843/0001-19, "
+        f"o valor de {formatar_real(total)} "
+        f"({total_extenso}),"
+        f"referente a serviços prestados de gestão comercial."
     )
 
     doc.add_paragraph(f"\nCompetência: {competencia_mes(mes)}")
@@ -189,13 +207,22 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None):
 
     doc.add_heading(f"TOTAL LÍQUIDO: {formatar_real(total)}", level=2)
 
+    # 🔥 DADOS BANCÁRIOS NO FINAL
+    if dados_bancarios:
+        doc.add_paragraph("")
+        doc.add_heading("DADOS BANCÁRIOS", level=2)
+        doc.add_paragraph(f"Nome: {dados_bancarios.get('nome','')}")
+        doc.add_paragraph(f"CNPJ: {dados_bancarios.get('cnpj','')}")
+        doc.add_paragraph(f"Banco: {dados_bancarios.get('banco','')}")
+        doc.add_paragraph(f"Agência: {dados_bancarios.get('agencia','')}")
+        doc.add_paragraph(f"Conta: {dados_bancarios.get('conta','')}")
+        doc.add_paragraph(f"PIX: {dados_bancarios.get('pix','')}")
+
     if imagem and os.path.exists(imagem):
         doc.add_page_break()
 
-        titulo = doc.add_paragraph(f"Anexo: Apuração Mês {mes}/{datetime.now().year}")
+        titulo = doc.add_paragraph(f"Apuração Mês {mes}/{datetime.now().year}")
         titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        doc.add_paragraph("")
 
         p_img = doc.add_paragraph()
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -208,8 +235,6 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None):
 
     return caminho
 
-# ==========================
-# ROTAS
 # ==========================
 @app.route("/")
 def home():
@@ -240,6 +265,14 @@ def sistema():
         file = request.files["file"]
         caminho = os.path.join(UPLOAD_FOLDER, file.filename)
         file.save(caminho)
+
+        mapa_banco = {}
+        file_banco = request.files.get("file_banco")
+
+        if file_banco and file_banco.filename != "":
+            caminho_banco = os.path.join(UPLOAD_FOLDER, file_banco.filename)
+            file_banco.save(caminho_banco)
+            mapa_banco = carregar_dados_bancarios(caminho_banco)
 
         mapa_imagens = {}
         file_imagens = request.files.get("file_imagens")
@@ -320,13 +353,16 @@ def sistema():
             if dados:
                 imagem_vendedor = encontrar_imagem(vendedor, mapa_imagens)
 
+                dados_bancarios = encontrar_dados_bancarios(vendedor, mapa_banco)
+
                 arquivo = gerar_recibo(
                     vendedor,
                     dados,
                     request.form["mes"],
                     total_planilha,
                     data_recibo,
-                    imagem_vendedor
+                    imagem_vendedor,
+                    dados_bancarios
                 )
 
                 arquivos.append(arquivo)

@@ -46,7 +46,7 @@
 </head>
 <body>
 
-    <h2> Gerador de Recibos</h2>
+    <h2>Gerador de Recibos</h2>
 
     <form method="POST" enctype="multipart/form-data">
 
@@ -54,10 +54,15 @@
         <label>Selecionar Planilha (Recibos):</label>
         <input type="file" name="file" required>
 
-        <!-- 🖼️ MELHORIA (SEM MUDAR LAYOUT) -->
+        <!-- 🖼️ PLANILHA DE IMAGENS -->
         <label>Planilha de Comissão (gera imagens por aba - colunas A:B):</label>
         <input type="file" name="file_imagens">
 
+        <!-- 🏦 NOVO: PLANILHA BANCÁRIA -->
+        <label>Planilha de Dados Bancários (Nome, CNPJ, Banco, Agência, Conta, Pix):</label>
+        <input type="file" name="file_banco">
+
+        <!-- 📅 MÊS -->
         <label>Mês da Competência:</label>
         <select name="mes" required>
             {% for mes in meses %}
@@ -67,9 +72,11 @@
             {% endfor %}
         </select>
 
+        <!-- 📆 DATA -->
         <label>Data do Recibo:</label>
         <input type="date" name="data_recibo" required>
 
+        <!-- 🚀 BOTÃO -->
         <button type="submit">Gerar Recibos + Imagens</button>
 
     </form>
