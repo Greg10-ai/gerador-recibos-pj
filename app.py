@@ -1,17 +1,15 @@
 import os
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
+import unicodedata
+import zipfile
 
-import matplotlib.pyplot as plt
 from flask import Flask, render_template, request, send_file, redirect, url_for, session
 from docx import Document
 from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from datetime import datetime
 from num2words import num2words
-import zipfile
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-import unicodedata
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 app.secret_key = "segredo123"
@@ -33,33 +31,27 @@ def normalizar_nome(nome):
     return nome
 
 # ==========================
-# DADOS BANCÁRIOS (CORRIGIDO)
+# DADOS BANCÁRIOS
 # ==========================
 def carregar_dados_bancarios(caminho):
     df = pd.read_excel(caminho)
-
-    # normaliza colunas
     df.columns = [normalizar_nome(col) for col in df.columns]
 
     mapa = {}
-
     for _, row in df.iterrows():
         nome = normalizar_nome(row.get("vendedores", ""))
-
         info = {
-            "nome": row.get("vendedores", ""),
-            "cnpj": row.get("cnpj", ""),
-            "banco": row.get("banco", ""),
+            "nome":    row.get("vendedores", ""),
+            "cnpj":    row.get("cnpj", ""),
+            "banco":   row.get("banco", ""),
             "agencia": row.get("agencia", ""),
-            "conta": row.get("conta", ""),
-            "pix": row.get("pix", "")
+            "conta":   row.get("conta", ""),
+            "pix":     row.get("pix", "")
         }
-
         mapa[nome] = info
 
     return mapa
 
-# MATCH INTELIGENTE
 def encontrar_dados_bancarios(nome_vendedor, mapa_banco):
     chave = normalizar_nome(nome_vendedor)
 
@@ -87,13 +79,13 @@ def encontrar_imagem(nome_vendedor, mapa_imagens):
     return None
 
 # ==========================
+# UTILITÁRIOS
+# ==========================
 def tratar_valor(valor):
     if pd.isna(valor):
         return None
-
     if isinstance(valor, str):
         valor = valor.replace("%", "").replace(".", "").replace(",", ".").strip()
-
     try:
         return round(float(valor), 2)
     except:
@@ -106,13 +98,15 @@ def formatar_real(valor):
 def formatar_data_extenso(data_str):
     meses = ["janeiro","fevereiro","março","abril","maio","junho",
              "julho","agosto","setembro","outubro","novembro","dezembro"]
-
     data = datetime.strptime(data_str, "%Y-%m-%d")
     return f"Porto Alegre, {data.day} de {meses[data.month - 1]} de {data.year}"
 
 def competencia_mes(mes):
     return f"{mes}/{datetime.now().year}"
 
+# ==========================
+# GERAR IMAGEM VIA PLAYWRIGHT
+# (screenshot perfeito do HTML estilizado igual ao Excel)
 # ==========================
 def gerar_imagens_abas(caminho_excel, mes_escolhido):
     imagens = {}
@@ -124,11 +118,10 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
 
             mes_lower = mes_escolhido.lower()
             linha_mes = None
-            col_mes = None
+            col_mes   = None
 
             for i in range(len(df_full)):
                 linha = df_full.iloc[i].fillna("").astype(str).str.lower()
-
                 if any(mes_lower in cel for cel in linha):
                     linha_mes = i
                     for j, cel in enumerate(linha):
@@ -138,40 +131,164 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
                     break
 
             if linha_mes is None or col_mes is None:
+                print(f"⚠️ Mês '{mes_escolhido}' não encontrado na aba '{aba}'")
                 continue
 
             header_row = linha_mes + 1
             df = pd.read_excel(xls, sheet_name=aba, header=header_row)
 
             descricao_col = df.columns[1]
-            valor_col = df.columns[col_mes]
+            valor_col     = df.columns[col_mes]
 
-            df_ab = df[[descricao_col, valor_col]].dropna(how="all").head(50)
+            df_ab = df[[descricao_col, valor_col]].dropna(how="all").head(60)
+            
+            CAMPOS_PERCENTUAL = [
+                "icm meta", "icm novos", "meta margem", "real",
+                "icm", "icm meta base ativa", "% carteira ativa", "% liquidado"
+                                ]
 
-            fig, ax = plt.subplots(figsize=(8, len(df_ab) * 0.4 + 1))
-            ax.axis('off')
+            # Formata valores numéricos como moeda
+            def formatar_celula(v, descricao=""):
+                desc_lower = str(descricao).strip().lower()
+                eh_percentual = any(c.lower() == desc_lower for c in CAMPOS_PERCENTUAL)
 
-            tabela = ax.table(
-                cellText=df_ab.values,
-                colLabels=df_ab.columns,
-                loc='center'
-            )
+                try:
+                    f = float(v)
+                    if eh_percentual:
+                        # Se já vier como 0.8097 (decimal), multiplica por 100
+                        if abs(f) <= 1.5:
+                            return f"{f * 100:.2f}%"
+                        # Se já vier como 80.97
+                        return f"{f:.2f}%"
+                except:
+                    return str(v) if pd.notna(v) else "-"
 
-            tabela.auto_set_font_size(False)
-            tabela.set_fontsize(8)
+                try:
+                    f = float(v)
+                    if f == int(f):
+                        return f"{int(f):,}".replace(",", ".")
+                    return f"R$ {f:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                except:
+                    return str(v) if pd.notna(v) else "-"
 
-            caminho_img = os.path.join(UPLOAD_FOLDER, f"{aba}.png")
+            df_formatado = df_ab.copy()
+            df_formatado[valor_col] = [
+                formatar_celula(row[valor_col], row[descricao_col])
+                for _, row in df_ab.iterrows()
+            ]
 
-            plt.savefig(caminho_img, bbox_inches='tight')
-            plt.close(fig)
+            # Gera linhas da tabela HTML
+            linhas_html = ""
+            for idx, row in df_formatado.iterrows():
+                desc  = row[descricao_col]
+                valor = row[valor_col]
+
+                # Detecta se é linha de total para destacar
+                is_total = "total" in str(desc).lower()
+
+                estilo_tr = 'class="total"' if is_total else ""
+                linhas_html += f"<tr {estilo_tr}><td>{desc}</td><td>{valor}</td></tr>\n"
+
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+        font-family: Calibri, Arial, sans-serif;
+        background: #ffffff;
+        padding: 24px;
+        width: 480px;
+    }}
+    h3 {{
+        color: #1F3864;
+        font-size: 14px;
+        margin-bottom: 12px;
+        font-weight: bold;
+    }}
+    table {{
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 12px;
+    }}
+    thead tr th {{
+        background-color: #1F3864;
+        color: #ffffff;
+        padding: 7px 12px;
+        text-align: center;
+        font-weight: bold;
+        border: 1px solid #1F3864;
+        letter-spacing: 0.3px;
+    }}
+    tbody tr td {{
+        padding: 5px 12px;
+        border: 1px solid #d0d7e8;
+        color: #1a1a1a;
+    }}
+    tbody tr td:first-child {{
+        text-align: left;
+        font-weight: 500;
+    }}
+    tbody tr td:last-child {{
+        text-align: right;
+    }}
+    tbody tr:nth-child(even) {{
+        background-color: #D9E1F2;
+    }}
+    tbody tr:nth-child(odd) {{
+        background-color: #ffffff;
+    }}
+    tbody tr.total td {{
+        background-color: #1F3864 !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        font-size: 13px;
+    }}
+</style>
+</head>
+<body>
+    <h3>Apuração Mês {mes_escolhido.capitalize()}/{datetime.now().year}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>{descricao_col}</th>
+                <th>{valor_col}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {linhas_html}
+        </tbody>
+    </table>
+</body>
+</html>"""
+
+            caminho_html = os.path.join(UPLOAD_FOLDER, f"{aba}.html")
+            caminho_img  = os.path.join(UPLOAD_FOLDER, f"{aba}.png")
+
+            with open(caminho_html, "w", encoding="utf-8") as f:
+                f.write(html)
+
+            # Screenshot via Playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch()
+                page    = browser.new_page()
+                page.goto(f"file://{caminho_html}")
+                page.wait_for_timeout(500)
+                page.screenshot(path=caminho_img, full_page=True)
+                browser.close()
 
             imagens[normalizar_nome(aba)] = caminho_img
+            print(f"✅ Imagem gerada: {aba} -> {caminho_img}")
 
-        except:
+        except Exception as e:
+            print(f"❌ Erro na aba '{aba}': {e}")
             continue
 
     return imagens
 
+# ==========================
+# GERAR RECIBO
 # ==========================
 def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_bancarios=None):
 
@@ -189,7 +306,7 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_ba
     doc.add_paragraph(
         f"\nInformo que recebi da empresa 3i Importação e Exportação Ltda, CNPJ 20.783.843/0001-19, "
         f"o valor de {formatar_real(total)} "
-        f"({total_extenso}),"
+        f"({total_extenso}), "
         f"referente a serviços prestados de gestão comercial."
     )
 
@@ -207,16 +324,15 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_ba
 
     doc.add_heading(f"TOTAL LÍQUIDO: {formatar_real(total)}", level=2)
 
-    # 🔥 DADOS BANCÁRIOS NO FINAL
     if dados_bancarios:
         doc.add_paragraph("")
         doc.add_heading("DADOS BANCÁRIOS", level=2)
-        doc.add_paragraph(f"Nome: {dados_bancarios.get('nome','')}")
-        doc.add_paragraph(f"CNPJ: {dados_bancarios.get('cnpj','')}")
-        doc.add_paragraph(f"Banco: {dados_bancarios.get('banco','')}")
-        doc.add_paragraph(f"Agência: {dados_bancarios.get('agencia','')}")
-        doc.add_paragraph(f"Conta: {dados_bancarios.get('conta','')}")
-        doc.add_paragraph(f"PIX: {dados_bancarios.get('pix','')}")
+        doc.add_paragraph(f"Nome: {dados_bancarios.get('nome', '')}")
+        doc.add_paragraph(f"CNPJ: {dados_bancarios.get('cnpj', '')}")
+        doc.add_paragraph(f"Banco: {dados_bancarios.get('banco', '')}")
+        doc.add_paragraph(f"Agência: {dados_bancarios.get('agencia', '')}")
+        doc.add_paragraph(f"Conta: {dados_bancarios.get('conta', '')}")
+        doc.add_paragraph(f"PIX: {dados_bancarios.get('pix', '')}")
 
     if imagem and os.path.exists(imagem):
         doc.add_page_break()
@@ -228,13 +344,15 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_ba
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         run = p_img.add_run()
-        run.add_picture(imagem, width=Inches(4))
+        run.add_picture(imagem, width=Inches(5))
 
     caminho = os.path.join(UPLOAD_FOLDER, f"Recibo_{vendedor}.docx")
     doc.save(caminho)
 
     return caminho
 
+# ==========================
+# ROTAS
 # ==========================
 @app.route("/")
 def home():
@@ -260,122 +378,122 @@ def sistema():
 
     if request.method == "POST":
 
-        data_recibo = request.form.get("data_recibo")
+        try:
+            data_recibo = request.form.get("data_recibo")
 
-        file = request.files["file"]
-        caminho = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(caminho)
+            # Salva relatório principal
+            file = request.files["file"]
+            caminho = os.path.join(UPLOAD_FOLDER, file.filename)
+            file.save(caminho)
 
-        mapa_banco = {}
-        file_banco = request.files.get("file_banco")
+            # Dados bancários (opcional)
+            mapa_banco = {}
+            file_banco = request.files.get("file_banco")
+            if file_banco and file_banco.filename != "":
+                caminho_banco = os.path.join(UPLOAD_FOLDER, file_banco.filename)
+                file_banco.save(caminho_banco)
+                mapa_banco = carregar_dados_bancarios(caminho_banco)
 
-        if file_banco and file_banco.filename != "":
-            caminho_banco = os.path.join(UPLOAD_FOLDER, file_banco.filename)
-            file_banco.save(caminho_banco)
-            mapa_banco = carregar_dados_bancarios(caminho_banco)
-
-        mapa_imagens = {}
-        file_imagens = request.files.get("file_imagens")
-
-        if file_imagens and file_imagens.filename != "":
-            caminho_img_excel = os.path.join(UPLOAD_FOLDER, file_imagens.filename)
-            file_imagens.save(caminho_img_excel)
-
-            mapa_imagens = gerar_imagens_abas(
-                caminho_img_excel,
-                request.form["mes"]
-            )
-
-        df_full = pd.read_excel(caminho, header=None)
-
-        mes_escolhido = request.form["mes"].lower()
-
-        linha_mes = None
-        col_inicio = None
-        col_fim = None
-
-        for i in range(len(df_full)):
-            linha = df_full.iloc[i].fillna("").astype(str).str.lower()
-
-            if any(mes_escolhido in cel for cel in linha):
-                linha_mes = i
-                for j, cel in enumerate(linha):
-                    if mes_escolhido in cel:
-                        col_inicio = j
-                        break
-                break
-
-        if linha_mes is None:
-            return "Mês não encontrado."
-
-        meses_lista = [m.lower() for m in meses]
-
-        for j in range(col_inicio + 1, len(df_full.columns)):
-            cel = str(df_full.iloc[linha_mes, j] or "").lower()
-            if any(m in cel for m in meses_lista) or "total" in cel:
-                col_fim = j
-                break
-
-        if col_fim is None:
-            col_fim = len(df_full.columns)
-
-        header_row = linha_mes + 1
-        df_base = pd.read_excel(caminho, header=header_row)
-
-        descricao_coluna = df_base.columns[1]
-        df_valores = df_base.iloc[:, col_inicio:col_fim]
-
-        df = pd.concat([df_base[[descricao_coluna]], df_valores], axis=1)
-        df = df.dropna(how="all")
-
-        vendedores = df.columns[1:]
-        arquivos = []
-
-        for vendedor in vendedores:
-
-            dados = {}
-            total_planilha = 0
-
-            for i in range(len(df)):
-                descricao = str(df.iloc[i][descricao_coluna]).strip()
-                valor_bruto = df.iloc[i][vendedor]
-
-                valor = tratar_valor(valor_bruto)
-
-                if descricao.upper() == "TOTAL":
-                    if valor is not None:
-                        total_planilha = valor
-                    continue
-
-                if valor is not None and valor != 0:
-                    dados[descricao] = valor
-
-            if dados:
-                imagem_vendedor = encontrar_imagem(vendedor, mapa_imagens)
-
-                dados_bancarios = encontrar_dados_bancarios(vendedor, mapa_banco)
-
-                arquivo = gerar_recibo(
-                    vendedor,
-                    dados,
-                    request.form["mes"],
-                    total_planilha,
-                    data_recibo,
-                    imagem_vendedor,
-                    dados_bancarios
+            # Imagens (opcional)
+            mapa_imagens = {}
+            file_imagens = request.files.get("file_imagens")
+            if file_imagens and file_imagens.filename != "":
+                caminho_img_excel = os.path.join(UPLOAD_FOLDER, file_imagens.filename)
+                file_imagens.save(caminho_img_excel)
+                mapa_imagens = gerar_imagens_abas(
+                    caminho_img_excel,
+                    request.form["mes"]
                 )
 
-                arquivos.append(arquivo)
+            df_full = pd.read_excel(caminho, header=None)
+            mes_escolhido = request.form["mes"].lower()
 
-        zip_path = os.path.join(UPLOAD_FOLDER, "Recibos.zip")
+            linha_mes  = None
+            col_inicio = None
+            col_fim    = None
 
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for arq in arquivos:
-                zipf.write(arq, os.path.basename(arq))
+            for i in range(len(df_full)):
+                linha = df_full.iloc[i].fillna("").astype(str).str.lower()
+                if any(mes_escolhido in cel for cel in linha):
+                    linha_mes = i
+                    for j, cel in enumerate(linha):
+                        if mes_escolhido in cel:
+                            col_inicio = j
+                            break
+                    break
 
-        return send_file(zip_path, as_attachment=True)
+            if linha_mes is None:
+                return "❌ Mês não encontrado no arquivo."
+
+            meses_lista = [m.lower() for m in meses]
+
+            for j in range(col_inicio + 1, len(df_full.columns)):
+                cel = str(df_full.iloc[linha_mes, j] or "").lower()
+                if any(m in cel for m in meses_lista) or "total" in cel:
+                    col_fim = j
+                    break
+
+            if col_fim is None:
+                col_fim = len(df_full.columns)
+
+            header_row    = linha_mes + 1
+            df_base       = pd.read_excel(caminho, header=header_row)
+            descricao_col = df_base.columns[1]
+            df_valores    = df_base.iloc[:, col_inicio:col_fim]
+            df            = pd.concat([df_base[[descricao_col]], df_valores], axis=1)
+            df            = df.dropna(how="all")
+
+            vendedores = df.columns[1:]
+            arquivos   = []
+
+            for vendedor in vendedores:
+                dados         = {}
+                total_planilha = 0
+
+                for i in range(len(df)):
+                    descricao   = str(df.iloc[i][descricao_col]).strip()
+                    valor_bruto = df.iloc[i][vendedor]
+                    valor       = tratar_valor(valor_bruto)
+
+                    if descricao.upper() == "TOTAL":
+                        if valor is not None:
+                            total_planilha = valor
+                        continue
+
+                    if valor is not None and valor != 0:
+                        dados[descricao] = valor
+
+                if dados:
+                    imagem_vendedor  = encontrar_imagem(vendedor, mapa_imagens)
+                    dados_bancarios  = encontrar_dados_bancarios(vendedor, mapa_banco)
+
+                    arquivo = gerar_recibo(
+                        vendedor,
+                        dados,
+                        request.form["mes"],
+                        total_planilha,
+                        data_recibo,
+                        imagem_vendedor,
+                        dados_bancarios
+                    )
+
+                    arquivos.append(arquivo)
+
+            zip_path = os.path.join(UPLOAD_FOLDER, "Recibos.zip")
+            with zipfile.ZipFile(zip_path, "w") as zipf:
+                for arq in arquivos:
+                    zipf.write(arq, os.path.basename(arq))
+
+            return send_file(zip_path, as_attachment=True)
+
+        except Exception as e:
+            import traceback
+            erro = traceback.format_exc()
+            print("❌ ERRO:", erro)
+            return f"<pre>❌ Erro: {erro}</pre>"
 
     return render_template("index.html", meses=meses, mes_atual=mes_atual)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
