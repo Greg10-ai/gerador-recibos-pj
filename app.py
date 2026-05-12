@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import unicodedata
 import zipfile
+
 from flask import Flask, render_template, request, send_file, redirect, url_for, session
 from docx import Document
 from docx.shared import Inches
@@ -104,61 +105,12 @@ def competencia_mes(mes):
     return f"{mes}/{datetime.now().year}"
 
 # ==========================
-# ROTA: APURAÇÃO (usada pelo Playwright para screenshot)
-# ==========================
-@app.route("/apuracao")
-def apuracao():
-    linhas      = request.args.get("linhas", "[]")
-    mes         = request.args.get("mes", "")
-    ano         = request.args.get("ano", "")
-    col_desc    = request.args.get("col_descricao", "Descrição")
-    col_valor   = request.args.get("col_valor", "Valor")
-
-    import json
-    linhas = json.loads(linhas)
-
-    return render_template(
-        "apuracao.html",
-        linhas=linhas,
-        mes=mes,
-        ano=ano,
-        col_descricao=col_desc,
-        col_valor=col_valor
-    )
-
-# ==========================
 # GERAR IMAGEM VIA PLAYWRIGHT
+# (screenshot perfeito do HTML estilizado igual ao Excel)
 # ==========================
-def gerar_imagens_abas(caminho_excel, mes_escolhido, base_url="http://localhost:5000"):
-    import json
+def gerar_imagens_abas(caminho_excel, mes_escolhido):
     imagens = {}
     xls = pd.ExcelFile(caminho_excel)
-
-    CAMPOS_PERCENTUAL = [
-        "icm meta", "icm novos", "meta margem", "real",
-        "icm", "icm meta base ativa", "% carteira ativa", "% liquidado"
-    ]
-
-    def formatar_celula(v, descricao=""):
-        desc_lower = str(descricao).strip().lower()
-        eh_percentual = any(c.lower() == desc_lower for c in CAMPOS_PERCENTUAL)
-
-        try:
-            f = float(v)
-            if eh_percentual:
-                if abs(f) <= 1.5:
-                    return f"{f * 100:.2f}%"
-                return f"{f:.2f}%"
-        except:
-            return str(v) if pd.notna(v) else "-"
-
-        try:
-            f = float(v)
-            if f == int(f):
-                return f"{int(f):,}".replace(",", ".")
-            return f"R$ {f:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        except:
-            return str(v) if pd.notna(v) else "-"
 
     for aba in xls.sheet_names:
         try:
@@ -189,6 +141,35 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido, base_url="http://localhost:
             valor_col     = df.columns[col_mes]
 
             df_ab = df[[descricao_col, valor_col]].dropna(how="all").head(60)
+            
+            CAMPOS_PERCENTUAL = [
+                "icm meta", "icm novos", "meta margem", "real",
+                "icm", "icm meta base ativa", "% carteira ativa", "% liquidado"
+                                ]
+
+            # Formata valores numéricos como moeda
+            def formatar_celula(v, descricao=""):
+                desc_lower = str(descricao).strip().lower()
+                eh_percentual = any(c.lower() == desc_lower for c in CAMPOS_PERCENTUAL)
+
+                try:
+                    f = float(v)
+                    if eh_percentual:
+                        # Se já vier como 0.8097 (decimal), multiplica por 100
+                        if abs(f) <= 1.5:
+                            return f"{f * 100:.2f}%"
+                        # Se já vier como 80.97
+                        return f"{f:.2f}%"
+                except:
+                    return str(v) if pd.notna(v) else "-"
+
+                try:
+                    f = float(v)
+                    if f == int(f):
+                        return f"{int(f):,}".replace(",", ".")
+                    return f"R$ {f:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                except:
+                    return str(v) if pd.notna(v) else "-"
 
             df_formatado = df_ab.copy()
             df_formatado[valor_col] = [
@@ -196,36 +177,103 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido, base_url="http://localhost:
                 for _, row in df_ab.iterrows()
             ]
 
-            # Monta lista de linhas como dicts para o template
-            linhas = []
-            for _, row in df_formatado.iterrows():
+            # Gera linhas da tabela HTML
+            linhas_html = ""
+            for idx, row in df_formatado.iterrows():
                 desc  = row[descricao_col]
                 valor = row[valor_col]
-                linhas.append({
-                    "descricao": str(desc),
-                    "valor":     str(valor),
-                    "is_total":  "total" in str(desc).lower()
-                })
 
-            # Monta URL para a rota /apuracao
-            params = {
-                "mes":          mes_escolhido.capitalize(),
-                "ano":          str(datetime.now().year),
-                "col_descricao": str(descricao_col),
-                "col_valor":    str(valor_col),
-                "linhas":       json.dumps(linhas, ensure_ascii=False)
-            }
+                # Detecta se é linha de total para destacar
+                is_total = "total" in str(desc).lower()
 
-            from urllib.parse import urlencode
-            url = f"{base_url}/apuracao?{urlencode(params)}"
+                estilo_tr = 'class="total"' if is_total else ""
+                linhas_html += f"<tr {estilo_tr}><td>{desc}</td><td>{valor}</td></tr>\n"
 
-            caminho_img = os.path.join(UPLOAD_FOLDER, f"{aba}.png")
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+        font-family: Calibri, Arial, sans-serif;
+        background: #ffffff;
+        padding: 24px;
+        width: 480px;
+    }}
+    h3 {{
+        color: #1F3864;
+        font-size: 14px;
+        margin-bottom: 12px;
+        font-weight: bold;
+    }}
+    table {{
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 12px;
+    }}
+    thead tr th {{
+        background-color: #1F3864;
+        color: #ffffff;
+        padding: 7px 12px;
+        text-align: center;
+        font-weight: bold;
+        border: 1px solid #1F3864;
+        letter-spacing: 0.3px;
+    }}
+    tbody tr td {{
+        padding: 5px 12px;
+        border: 1px solid #d0d7e8;
+        color: #1a1a1a;
+    }}
+    tbody tr td:first-child {{
+        text-align: left;
+        font-weight: 500;
+    }}
+    tbody tr td:last-child {{
+        text-align: right;
+    }}
+    tbody tr:nth-child(even) {{
+        background-color: #D9E1F2;
+    }}
+    tbody tr:nth-child(odd) {{
+        background-color: #ffffff;
+    }}
+    tbody tr.total td {{
+        background-color: #1F3864 !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        font-size: 13px;
+    }}
+</style>
+</head>
+<body>
+    <h3>Apuração Mês {mes_escolhido.capitalize()}/{datetime.now().year}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>{descricao_col}</th>
+                <th>{valor_col}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {linhas_html}
+        </tbody>
+    </table>
+</body>
+</html>"""
 
-            # Screenshot via Playwright apontando para a rota Flask
+            caminho_html = os.path.join(UPLOAD_FOLDER, f"{aba}.html")
+            caminho_img  = os.path.join(UPLOAD_FOLDER, f"{aba}.png")
+
+            with open(caminho_html, "w", encoding="utf-8") as f:
+                f.write(html)
+
+            # Screenshot via Playwright
             with sync_playwright() as p:
                 browser = p.chromium.launch()
                 page    = browser.new_page()
-                page.goto(url)
+                page.goto(f"file://{caminho_html}")
                 page.wait_for_timeout(500)
                 page.screenshot(path=caminho_img, full_page=True)
                 browser.close()
@@ -315,7 +363,7 @@ def login():
     if request.form["usuario"] == USUARIO and request.form["senha"] == SENHA:
         session["logado"] = True
         return redirect(url_for("sistema"))
-    return render_template("login.html", erro="Usuário ou senha inválidos."), 401
+    return "Login inválido"
 
 @app.route("/sistema", methods=["GET", "POST"])
 def sistema():
@@ -333,10 +381,12 @@ def sistema():
         try:
             data_recibo = request.form.get("data_recibo")
 
+            # Salva relatório principal
             file = request.files["file"]
             caminho = os.path.join(UPLOAD_FOLDER, file.filename)
             file.save(caminho)
 
+            # Dados bancários (opcional)
             mapa_banco = {}
             file_banco = request.files.get("file_banco")
             if file_banco and file_banco.filename != "":
@@ -344,19 +394,15 @@ def sistema():
                 file_banco.save(caminho_banco)
                 mapa_banco = carregar_dados_bancarios(caminho_banco)
 
+            # Imagens (opcional)
             mapa_imagens = {}
             file_imagens = request.files.get("file_imagens")
             if file_imagens and file_imagens.filename != "":
                 caminho_img_excel = os.path.join(UPLOAD_FOLDER, file_imagens.filename)
                 file_imagens.save(caminho_img_excel)
-
-                # Pega a URL base do Railway automaticamente
-                base_url = request.host_url.rstrip("/")
-
                 mapa_imagens = gerar_imagens_abas(
                     caminho_img_excel,
-                    request.form["mes"],
-                    base_url=base_url
+                    request.form["mes"]
                 )
 
             df_full = pd.read_excel(caminho, header=None)
@@ -377,8 +423,7 @@ def sistema():
                     break
 
             if linha_mes is None:
-                return render_template("index.html", meses=meses, mes_atual=mes_atual,
-                                       erro="❌ Mês não encontrado no arquivo.")
+                return "❌ Mês não encontrado no arquivo."
 
             meses_lista = [m.lower() for m in meses]
 
@@ -402,7 +447,7 @@ def sistema():
             arquivos   = []
 
             for vendedor in vendedores:
-                dados          = {}
+                dados         = {}
                 total_planilha = 0
 
                 for i in range(len(df)):
@@ -419,8 +464,8 @@ def sistema():
                         dados[descricao] = valor
 
                 if dados:
-                    imagem_vendedor = encontrar_imagem(vendedor, mapa_imagens)
-                    dados_bancarios = encontrar_dados_bancarios(vendedor, mapa_banco)
+                    imagem_vendedor  = encontrar_imagem(vendedor, mapa_imagens)
+                    dados_bancarios  = encontrar_dados_bancarios(vendedor, mapa_banco)
 
                     arquivo = gerar_recibo(
                         vendedor,
@@ -445,8 +490,7 @@ def sistema():
             import traceback
             erro = traceback.format_exc()
             print("❌ ERRO:", erro)
-            return render_template("index.html", meses=meses, mes_atual=mes_atual,
-                                   erro=f"Erro interno: {e}"), 500
+            return f"<pre>❌ Erro: {erro}</pre>"
 
     return render_template("index.html", meses=meses, mes_atual=mes_atual)
 
