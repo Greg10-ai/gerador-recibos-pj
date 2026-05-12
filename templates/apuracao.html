@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: Calibri, Arial, sans-serif;
+        background: #ffffff;
+        padding: 24px;
+        width: 480px;
+    }
+    h3 {
+        color: #1F3864;
+        font-size: 14px;
+        margin-bottom: 12px;
+        font-weight: bold;
+    }
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 12px;
+    }
+    thead tr th {
+        background-color: #1F3864;
+        color: #ffffff;
+        padding: 7px 12px;
+        text-align: center;
+        font-weight: bold;
+        border: 1px solid #1F3864;
+        letter-spacing: 0.3px;
+    }
+    tbody tr td {
+        padding: 5px 12px;
+        border: 1px solid #d0d7e8;
+        color: #1a1a1a;
+    }
+    tbody tr td:first-child {
+        text-align: left;
+        font-weight: 500;
+    }
+    tbody tr td:last-child {
+        text-align: right;
+    }
+    tbody tr:nth-child(even) {
+        background-color: #D9E1F2;
+    }
+    tbody tr:nth-child(odd) {
+        background-color: #ffffff;
+    }
+    tbody tr.total td {
+        background-color: #1F3864 !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        font-size: 13px;
+    }
+</style>
+</head>
+<body>
+    <h3>Apuração Mês {{ mes }}/{{ ano }}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>{{ col_descricao }}</th>
+                <th>{{ col_valor }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in linhas %}
+                <tr {% if row.is_total %}class="total"{% endif %}>
+                    <td>{{ row.descricao }}</td>
+                    <td>{{ row.valor }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
