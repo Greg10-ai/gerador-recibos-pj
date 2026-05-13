@@ -209,7 +209,7 @@ def competencia_mes(mes):
 
 # ==========================
 # GERAR IMAGENS DAS ABAS
-# Substitui Playwright por WeasyPrint + pdf2image (com fallback para matplotlib)
+# Usa openpyxl read_only para evitar OOM no Gunicorn
 # ==========================
 CAMPOS_PERCENTUAL = {
     "icm meta", "icm novos", "meta margem", "real",
@@ -233,52 +233,81 @@ def formatar_celula(v, descricao=""):
 
 def gerar_imagens_abas(caminho_excel, mes_escolhido):
     imagens = {}
-    xls = pd.ExcelFile(caminho_excel)
+    mes_lower = mes_escolhido.lower()
 
-    for aba in xls.sheet_names:
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(caminho_excel, read_only=True, data_only=True)
+    except Exception as e:
+        print(f"❌ Não foi possível abrir o Excel: {e}")
+        return imagens
+
+    for aba in wb.sheetnames:
         try:
-            df_full = pd.read_excel(xls, sheet_name=aba, header=None)
+            ws = wb[aba]
 
-            mes_lower = mes_escolhido.lower()
             linha_mes = col_mes = None
 
-            for i in range(len(df_full)):
-                linha = df_full.iloc[i].fillna("").astype(str).str.lower()
-                if any(mes_lower in cel for cel in linha):
-                    linha_mes = i
-                    for j, cel in enumerate(linha):
-                        if mes_lower in cel:
+            # Lê apenas as primeiras 30 linhas para encontrar o mês
+            todas_linhas = []
+            for i, row in enumerate(ws.iter_rows(max_row=30, values_only=True)):
+                todas_linhas.append(row)
+                if linha_mes is None:
+                    for j, cel in enumerate(row):
+                        if cel and mes_lower in str(cel).lower():
+                            linha_mes = i
                             col_mes = j
                             break
-                    break
 
             if linha_mes is None or col_mes is None:
                 print(f"⚠️ Mês '{mes_escolhido}' não encontrado na aba '{aba}'")
                 continue
 
-            header_row = linha_mes + 1
-            df = pd.read_excel(xls, sheet_name=aba, header=header_row)
+            # Cabeçalho: linha imediatamente após a linha do mês
+            header_row_idx = linha_mes + 1
+            if header_row_idx >= len(todas_linhas):
+                print(f"⚠️ Sem cabeçalho após linha do mês na aba '{aba}'")
+                continue
 
-            descricao_col = df.columns[1]
-            valor_col     = df.columns[col_mes]
+            headers = todas_linhas[header_row_idx]
+            descricao_col = headers[1] if len(headers) > 1 else "Descrição"
+            valor_col     = headers[col_mes] if len(headers) > col_mes else mes_escolhido
 
-            df_ab = df[[descricao_col, valor_col]].dropna(how="all").head(60)
-
-            # Prepara linhas formatadas
-            rows_fmt = []
+            # Lê apenas as colunas necessárias das próximas 60 linhas
+            rows_fmt    = []
             linhas_html = ""
-            for _, row in df_ab.iterrows():
-                desc    = row[descricao_col]
-                val_str = formatar_celula(row[valor_col], desc)
-                is_tot  = "total" in str(desc).lower()
-                rows_fmt.append((desc, val_str, is_tot))
+            count       = 0
 
-                estilo_tr   = 'class="total"' if is_tot else ""
+            # min_row é 1-based: header está em (header_row_idx + 1), dados começam em (header_row_idx + 2)
+            for row in ws.iter_rows(
+                min_row=header_row_idx + 2,
+                max_row=header_row_idx + 62,
+                values_only=True
+            ):
+                if count >= 60:
+                    break
+
+                desc = row[1]       if len(row) > 1       else None
+                val  = row[col_mes] if len(row) > col_mes else None
+
+                if desc is None and val is None:
+                    continue
+
+                desc    = desc if desc is not None else "-"
+                val_str = formatar_celula(val, desc)
+                is_tot  = "total" in str(desc).lower()
+
+                rows_fmt.append((desc, val_str, is_tot))
+                estilo_tr    = 'class="total"' if is_tot else ""
                 linhas_html += f"<tr {estilo_tr}><td>{desc}</td><td>{val_str}</td></tr>\n"
+                count += 1
+
+            if not rows_fmt:
+                print(f"⚠️ Nenhum dado encontrado na aba '{aba}'")
+                continue
 
             caminho_img = os.path.join(UPLOAD_FOLDER, f"{aba}.png")
 
-            # ── Tenta WeasyPrint primeiro ──────────────────────────────────
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -323,7 +352,6 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
 
             ok = _render_html_to_png_weasyprint(html, caminho_img)
 
-            # ── Fallback: matplotlib (sem dependências de sistema) ─────────
             if not ok:
                 print(f"↩️  Usando matplotlib para '{aba}'")
                 ok = _render_table_to_png_matplotlib(
@@ -341,7 +369,9 @@ def gerar_imagens_abas(caminho_excel, mes_escolhido):
             print(f"❌ Erro na aba '{aba}': {e}")
             continue
 
+    wb.close()
     return imagens
+
 
 # ==========================
 # GERAR RECIBO
@@ -390,7 +420,6 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_ba
         doc.add_paragraph(f"PIX: {dados_bancarios.get('pix', '')}")
 
     if imagem and os.path.exists(imagem):
-        # ✅ FIX 1: page break embutido no parágrafo do título, sem criar parágrafo vazio extra
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
         from PIL import Image as PILImage
@@ -398,27 +427,21 @@ def gerar_recibo(vendedor, dados, mes, total, data_recibo, imagem=None, dados_ba
         titulo = doc.add_paragraph()
         titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run_break = titulo.add_run()
-        # Insere a quebra de página dentro do próprio run, sem parágrafo em branco
         br = OxmlElement('w:br')
         br.set(qn('w:type'), 'page')
         run_break._r.append(br)
         run_break.text = f"Apuração Mês {mes}/{datetime.now().year}"
 
-        # ✅ FIX 2: calcula largura/altura para caber na página sem cortar
-        # Página A4: 21cm úteis com margens de ~2.5cm = ~16cm = 6.3 inches de largura
-        # Altura útil por página: ~25cm = ~9.8 inches
         MAX_W = 6.0   # inches
-        MAX_H = 8.5   # inches — deixa espaço para o título acima
+        MAX_H = 8.5   # inches
 
         with PILImage.open(imagem) as img:
             img_w_px, img_h_px = img.size
 
-        # DPI da imagem gerada foi 150
         img_w_in = img_w_px / 150
         img_h_in = img_h_px / 150
 
-        # Escala para caber dentro dos limites mantendo proporção
-        escala = min(MAX_W / img_w_in, MAX_H / img_h_in, 1.0)
+        escala  = min(MAX_W / img_w_in, MAX_H / img_h_in, 1.0)
         final_w = Inches(img_w_in * escala)
 
         p_img = doc.add_paragraph()
